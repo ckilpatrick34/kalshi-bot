@@ -1,0 +1,14 @@
+[project]
+name = "kalshi-bot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["pandas>=2.0", "pyarrow>=14", "requests>=2.31", "cryptography>=41"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["kalshi_bot*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
