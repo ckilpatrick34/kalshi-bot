@@ -17,6 +17,7 @@ from .data import normalize_markets, normalize_trades, save
 
 def collect_series(client: KalshiClient, series_ticker: str, out: Path, since: pd.Timestamp | None) -> None:
     fee_type = client.get_series(series_ticker).get("fee_type", "quadratic")
+    cutoff = pd.Timestamp(client.historical_cutoff()["trades_created_ts"])
 
     records = {}
     for historical in (True, False):
@@ -34,7 +35,11 @@ def collect_series(client: KalshiClient, series_ticker: str, out: Path, since: p
     trade_records = []
     for i, ticker in enumerate(markets["ticker"], 1):
         seen = set()
-        for historical in (True, False):
+        close_time = markets.loc[markets["ticker"] == ticker, "close_time"].iloc[0]
+        open_time = markets.loc[markets["ticker"] == ticker, "open_time"].iloc[0]
+        # Trades before the cutoff live only on /historical, later ones only on the live endpoint.
+        sources = [h for h, needed in ((True, open_time < cutoff), (False, close_time >= cutoff)) if needed]
+        for historical in sources:
             for t in client.trades(historical=historical, ticker=ticker):
                 if t["trade_id"] not in seen:
                     seen.add(t["trade_id"])

@@ -38,6 +38,8 @@ class KalshiClient:
         self.session = session or requests.Session()
         self.key_id = os.environ.get("KALSHI_API_KEY_ID")
         self._private_key = None
+        self.min_interval = 0.06
+        self._last_request = 0.0
 
     # --- auth -------------------------------------------------------------
 
@@ -81,12 +83,20 @@ class KalshiClient:
 
     # --- transport --------------------------------------------------------
 
+    def _throttle(self) -> None:
+        # Basic-tier read limit is 20 requests/s; stay under it so bulk collection doesn't trip 429s.
+        wait = self._last_request + self.min_interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request = time.monotonic()
+
     def _request(self, method: str, endpoint: str, auth: bool = False, **kwargs) -> dict:
         headers = self._auth_headers(method, endpoint) if auth else {}
-        for attempt in range(5):
+        for attempt in range(8):
+            self._throttle()
             resp = self.session.request(method, self.base_url + endpoint, headers=headers, timeout=30, **kwargs)
             if resp.status_code == 429:
-                time.sleep(2**attempt * 0.5)
+                time.sleep(min(2**attempt * 0.5, 30))
                 if auth:
                     headers = self._auth_headers(method, endpoint)
                 continue
