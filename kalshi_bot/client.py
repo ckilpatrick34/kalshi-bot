@@ -38,7 +38,7 @@ class KalshiClient:
         self.session = session or requests.Session()
         self.key_id = os.environ.get("KALSHI_API_KEY_ID")
         self._private_key = None
-        self.min_interval = 0.06
+        self.min_interval = 0.1
         self._last_request = 0.0
 
     # --- auth -------------------------------------------------------------
@@ -92,11 +92,12 @@ class KalshiClient:
 
     def _request(self, method: str, endpoint: str, auth: bool = False, **kwargs) -> dict:
         headers = self._auth_headers(method, endpoint) if auth else {}
-        for attempt in range(8):
+        for attempt in range(12):
             self._throttle()
             resp = self.session.request(method, self.base_url + endpoint, headers=headers, timeout=30, **kwargs)
             if resp.status_code == 429:
-                time.sleep(min(2**attempt * 0.5, 30))
+                retry_after = resp.headers.get("Retry-After")
+                time.sleep(float(retry_after) if retry_after else min(2**attempt * 0.5, 60))
                 if auth:
                     headers = self._auth_headers(method, endpoint)
                 continue
