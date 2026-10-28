@@ -42,9 +42,9 @@ def collect_series(
         markets = markets[markets["event_ticker"].isin(events[::step][:n_events])]
     print(f"{series_ticker}: {len(markets)} settled markets")
 
-    trade_records = []
+    frames, n_trades = [], 0
     for i, ticker in enumerate(markets["ticker"], 1):
-        seen = set()
+        seen, trade_records = set(), []
         close_time = markets.loc[markets["ticker"] == ticker, "close_time"].iloc[0]
         open_time = markets.loc[markets["ticker"] == ticker, "open_time"].iloc[0]
         # Trades before the cutoff live only on /historical, later ones only on the live endpoint.
@@ -54,9 +54,12 @@ def collect_series(
                 if t["trade_id"] not in seen:
                     seen.add(t["trade_id"])
                     trade_records.append(t)
+        # Normalize per market: millions of raw dicts at once can exhaust memory on busy series.
+        frames.append(normalize_trades(trade_records))
+        n_trades += len(frames[-1])
         if i % 50 == 0:
-            print(f"  {i}/{len(markets)} markets, {len(trade_records)} trades")
-    trades = normalize_trades(trade_records)
+            print(f"  {i}/{len(markets)} markets, {n_trades} trades")
+    trades = pd.concat(frames, ignore_index=True).sort_values("ts", kind="stable").reset_index(drop=True)
 
     save(markets, out / series_ticker / "markets.parquet")
     save(trades, out / series_ticker / "trades.parquet")

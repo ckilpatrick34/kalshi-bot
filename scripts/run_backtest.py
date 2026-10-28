@@ -34,9 +34,10 @@ def main() -> None:
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument("--split", type=pd.Timestamp, required=True)
     parser.add_argument("--cash", type=float, default=500.0)
+    parser.add_argument("--series", nargs="*", help="only these series (default: everything under --data)")
     args = parser.parse_args()
 
-    markets, trades = load_dataset(args.data)
+    markets, trades = load_dataset(args.data, args.series)
     cutoff = args.split.tz_localize("UTC")
     train = split(markets, trades, cutoff, before=True)
     test = split(markets, trades, cutoff, before=False)

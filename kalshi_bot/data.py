@@ -65,10 +65,11 @@ def save(df: pd.DataFrame, path: Path) -> None:
     df.to_parquet(path, index=False)
 
 
-def load_dataset(root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load every series under root/<series>/{markets,trades}.parquet."""
-    markets = [pd.read_parquet(p) for p in sorted(root.glob("*/markets.parquet"))]
-    trades = [pd.read_parquet(p) for p in sorted(root.glob("*/trades.parquet"))]
+def load_dataset(root: Path, series: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load root/<series>/{markets,trades}.parquet for the given series, or every series under root."""
+    dirs = [root / s for s in series] if series else sorted(p.parent for p in root.glob("*/markets.parquet"))
+    markets = [pd.read_parquet(d / "markets.parquet") for d in dirs]
+    trades = [pd.read_parquet(d / "trades.parquet") for d in dirs]
     if not markets:
         raise FileNotFoundError(f"No collected data under {root}")
     trades_df = pd.concat(trades, ignore_index=True).sort_values("ts", kind="stable").reset_index(drop=True)
