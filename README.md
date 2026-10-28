@@ -3,10 +3,10 @@
 Research, backtesting and (eventually) execution for Kalshi prediction markets.
 The research write-up behind this code: https://claude.ai/artifact/89RoCLY3Kw7hYSgsVn2KAq
 
-The `kalshi_bot/sports` engine trades sports game-winner contracts on Kalshi and
-Polymarket US, using sharp sportsbook lines only as fair value. Its strategy is the
-Betting Edge Playbook: https://claude.ai/artifact/5yMzCVDdZ18CjthFKG5cGd
-See [Sports engine](#sports-engine) below.
+The `kalshi_bot/sports` tool models upcoming games and lists sports contracts on Kalshi
+and Polymarket US that are priced below the model's win probability. It only advises
+and never places orders. See [Sports picks](#sports-picks) below. Background research:
+https://claude.ai/artifact/5yMzCVDdZ18CjthFKG5cGd
 
 ## Stages
 
@@ -28,8 +28,8 @@ See [Sports engine](#sports-engine) below.
 | `kalshi_bot/strategies/longshot.py` | Sells overpriced longshots with resting orders |
 | `kalshi_bot/strategies/bracket.py` | Finds bracket ladders that don't add up to $1 after fees |
 | `scripts/run_backtest.py` | Parameter search on older data, one out-of-sample run on newer data |
-| `kalshi_bot/polymarket_us.py` | Polymarket US REST client with Ed25519 signing; refuses orders unless `POLYMARKET_US_ALLOW_LIVE=1` |
-| `kalshi_bot/sports/` | Sports engine: sharp-line fair value, edge finder, Kelly sizing, CLV ledger |
+| `kalshi_bot/polymarket_us.py` | Read-only Polymarket US market data (no orders) |
+| `kalshi_bot/sports/` | Sports picks: Elo game model, venue prices, EV after fees, model backtest |
 
 ## Usage
 
@@ -59,73 +59,67 @@ Never commit keys or paste them in chat. Set them as environment variables
 - Order-endpoint paths and fields follow Kalshi's docs as of Oct 2026 and need a
   check against the demo exchange before first use.
 
-## Sports engine
+## Sports picks
 
-Prices NFL, NBA, MLB and NHL (plus college football and basketball if enabled) game-winner
-contracts on Kalshi and Polymarket US against devigged Pinnacle moneylines, and buys
-only contracts priced better than fair after the venue's fee. It never places a
-sportsbook bet; sportsbook prices are read-only inputs.
+Gives you win percentages for upcoming games and the plays where Kalshi or Polymarket US
+prices a team below that percentage after fees. You decide what, if anything, to bet.
+Nothing here places an order.
 
 ```bash
-python -m kalshi_bot.sports scan            # read-only list of mispriced contracts
-python -m kalshi_bot.sports run --once      # one paper-trading cycle
-python -m kalshi_bot.sports run --every 300 # paper trade every 5 minutes
-python -m kalshi_bot.sports settle          # grade finished games
-python -m kalshi_bot.sports report          # P&L and closing-line value
+python -m kalshi_bot.sports picks             # flagged high-EV plays
+python -m kalshi_bot.sports picks --all       # every priced contract, with model %
+python -m kalshi_bot.sports picks --csv picks.csv
+python -m kalshi_bot.sports backtest          # how accurate the model has been
+python -m kalshi_bot.sports ratings nba       # current team ratings
 ```
 
-How it works, one cycle:
+No keys are needed: results come from ESPN's public scoreboard, and prices from Kalshi's
+and Polymarket US's public market data. The first run downloads a few seasons of results
+and caches finished months under `data/results/`.
 
-1. **Fair value.** Pull moneylines for the sharp books in `SPORTS_SHARP_BOOKS` from
-   The Odds API, strip the margin with the power method, and average across books.
-2. **Match.** Read each venue's game-winner contracts and pair them with games by team
-   names and date. Pairings that aren't clear-cut are skipped, not guessed.
-3. **Edge.** All-in cost is price plus fee: Kalshi taker `0.07·P·(1−P)`, Kalshi maker per
-   the series' fee type, Polymarket US taker `0.05·P·(1−P)`, Polymarket US maker free.
-   - Take the ask only if fair minus cost is at least `SPORTS_TAKER_MIN_EDGE` (3¢).
-   - Otherwise rest a post-only bid one cent above the best bid, capped where fair minus
-     cost is still `SPORTS_MAKER_MIN_EDGE` (1.5¢). Maker orders are the default path.
-4. **Size.** Quarter Kelly, `(p − c) / (1 − c)` of bankroll times `SPORTS_KELLY_FRACTION`,
-   capped so the worst-case loss on one game across venues stays under `SPORTS_MAX_GAME_PCT` (3%).
-5. **Manage.** Each cycle cancels resting bids whose edge disappeared after the sharp line
-   moved, reprices when outbid, and cancels everything 5 minutes before the start.
-   Pre-game only for now.
-6. **Ledger.** Every order goes to SQLite (`data/sports_ledger.sqlite`). The last fair value
-   before the start is the closing line, and every fill gets `CLV = closing fair − cost`.
-   Positive average CLV is the early sign the process works, long before P&L is reliable.
+How it works:
 
-Paper mode is the default. A paper maker bid counts as filled when the venue's ask drops
-to its price, which ignores queue position, so treat paper maker results as approximate.
+1. **Model.** An Elo rating per team per league, learned from every game in the last
+   `SPORTS_HISTORY_YEARS` seasons. Home advantage, margin of victory and an offseason pull
+   back toward average follow FiveThirtyEight's published Elo settings. The home team's win
+   probability is `1 / (1 + 10^(-(home + home advantage - away) / 400))`.
+2. **Prices.** Each venue's game-winner contracts are matched to the games by team names and
+   date. The ask is the price you would pay right now.
+3. **EV.** Cost = ask + taker fee (Kalshi `0.07·P·(1−P)`, Polymarket US `0.05·P·(1−P)`).
+   `Edge = model % − cost`, `EV = model % / cost − 1` per $1 staked. Plays with EV at or above
+   `SPORTS_MIN_EV` (5%) are flagged with `*`. A resting limit order below the ask
+   avoids most fees and does better than this.
+4. **Stake.** A quarter-Kelly suggestion on `SPORTS_BANKROLL`, capped at
+   `SPORTS_MAX_GAME_PCT` of bankroll per game.
+5. **Second opinion (optional).** With `ODDS_API_KEY` set, each play also shows the devigged
+   Pinnacle probability. A play where the model and the sharp line both beat the price is
+   much stronger than one where only the model does.
 
-### Sports settings (environment variables)
+### How much to trust the percentages
+
+Run `backtest` first. It replays history and scores every prediction made before the game,
+reporting accuracy, log loss against a pick-the-home-team baseline, and calibration (when
+the model said 70%, how often did that team win). Elo knows only results: it doesn't know
+about injuries, rest, starting pitchers or goalies, or weather. The betting markets do.
+So a big gap between the model and the price often means the market knows something the
+model doesn't. Treat flagged plays as a shortlist to check, not as bets, and prefer the
+ones where the sharp line agrees. Plays marked `(thin data)` involve a team with fewer
+than 8 games in the model. They are never flagged.
+
+### Settings (environment variables)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ODDS_API_KEY` | none, required | The Odds API key |
-| `SPORTS_VENUES` | `kalshi,polymarket` | Drop a venue that isn't legal or funded in your state |
 | `SPORTS_LEAGUES` | `nfl,nba,mlb,nhl` | Also `ncaaf`, `ncaab` |
-| `SPORTS_SHARP_BOOKS` | `pinnacle` | The Odds API bookmaker keys to devig and average |
-| `SPORTS_MODE` | `paper` | `live` also needs each venue's allow-live flag |
-| `SPORTS_BANKROLL` | `500` | Dollars |
+| `SPORTS_VENUES` | `kalshi,polymarket` | Drop a venue that isn't legal or funded in your state |
+| `SPORTS_MIN_EV` | `0.05` | EV per $1 after fees needed to flag a play |
+| `SPORTS_BANKROLL` | `500` | Dollars, for the suggested stake only |
 | `SPORTS_KELLY_FRACTION` | `0.25` | Quarter Kelly |
-| `SPORTS_MAKER_MIN_EDGE` / `SPORTS_TAKER_MIN_EDGE` | `0.015` / `0.03` | Dollars per contract after fees |
-| `SPORTS_MAX_GAME_PCT` | `0.03` | Worst-case loss on one game, share of bankroll |
-| `SPORTS_LEDGER` | `data/sports_ledger.sqlite` | Ledger path (git-ignored) |
-| `POLYMARKET_US_KEY_ID`, `POLYMARKET_US_SECRET_KEY` | none | Polymarket US API key, live mode only |
-| `POLYMARKET_US_ALLOW_LIVE` | unset | `1` to allow real Polymarket US orders |
+| `SPORTS_MAX_GAME_PCT` | `0.03` | Suggested stake cap per game |
+| `SPORTS_DAYS_AHEAD` | `3` | How far ahead to look for games |
+| `SPORTS_HISTORY_YEARS` | `3` | Seasons of results the model learns from |
+| `ODDS_API_KEY` | unset | Optional, adds the sharp-line column (free tier at the-odds-api.com) |
 
-Kalshi uses the credentials listed above. Live Kalshi orders go to `KALSHI_ENV` (demo by
-default) while market data always comes from prod, so demo testing needs demo tickers to match.
-
-### Before going live
-
-- Check each league's Kalshi series ticker and Polymarket US league slug in
-  `kalshi_bot/sports/config.py` against the venues, and run `scan` to confirm games match.
-- Polymarket US order, cancel and order-status paths follow docs.polymarket.us (Oct 2026)
-  but haven't been exercised. In particular, confirm that a `BUY_SHORT` limit price is the
-  NO price before trading the second team on Polymarket. Start with one 1-contract order.
-- Read each contract's settlement rules. Overtime, postponements and ties can settle
-  differently from a sportsbook moneyline.
-- Sports contracts face legal challenges in several states. Confirm your state's status
-  and set `SPORTS_VENUES` to match.
-- Watch paper CLV for a few weeks first. If average CLV isn't positive, the edge isn't real.
+Kalshi series tickers and Polymarket US league slugs are in `kalshi_bot/sports/config.py`.
+They follow the venues as of Oct 2026 and haven't yet been checked against live responses.
+Check the per-league "priced N of M games" lines that `picks` prints.

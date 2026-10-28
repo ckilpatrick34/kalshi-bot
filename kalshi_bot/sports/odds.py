@@ -1,8 +1,8 @@
-"""Sharp-book fair values from The Odds API (https://the-odds-api.com).
+"""Optional second opinion: sharp-book fair values from The Odds API (https://the-odds-api.com).
 
 Pinnacle is listed in the API's "eu" region. Naming bookmakers directly overrides
-the region. Each call costs credits (markets x regions), so the engine polls
-every few minutes, not every second. The key comes from ODDS_API_KEY.
+the region. Each call costs credits (markets x regions); a picks run makes one
+call per league. The key comes from ODDS_API_KEY.
 
 This only reads sportsbook prices. Nothing here places a bet anywhere.
 """
@@ -90,19 +90,7 @@ class OddsClient:
             dateFormat="iso",
         )
 
-    def scores(self, sport: str, days_from: int = 3) -> list[dict]:
-        return self._get(f"/sports/{sport}/scores", daysFrom=days_from, dateFormat="iso")
-
     def fair_values(self, league: str, sport: str, sharp_books: list[str], method: str = "power") -> list[Game]:
         games = (fair_from_event(e, league, sharp_books, method) for e in self.moneylines(sport, sharp_books))
         return [g for g in games if g is not None]
 
-
-def winner_from_score(event: dict) -> str | None:
-    """Winning team of a completed game from the scores endpoint, or None if not final or tied."""
-    if not event.get("completed") or not event.get("scores"):
-        return None
-    scores = {s["name"]: float(s["score"]) for s in event["scores"]}
-    if len(scores) != 2 or len(set(scores.values())) == 1:
-        return None
-    return max(scores, key=scores.get)

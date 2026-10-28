@@ -5,10 +5,10 @@ import pytest
 from kalshi_bot.fees import polymarket_us_taker_fee
 from kalshi_bot.sports.config import LEAGUES, SportsConfig
 from kalshi_bot.sports.devig import american_to_decimal, devig
-from kalshi_bot.sports.edge import evaluate, kelly_fraction, maker_price
-from kalshi_bot.sports.engine import Engine
-from kalshi_bot.sports.ledger import Ledger
-from kalshi_bot.sports.odds import Game, fair_from_event, winner_from_score
+from kalshi_bot.sports.model import PARAMS, Elo, EloParams, backtest, margin_multiplier
+from kalshi_bot.sports.odds import Game, fair_from_event
+from kalshi_bot.sports.plays import model_games, plays_for
+from kalshi_bot.sports.results import GameResult, parse_scoreboard, parse_time, read_csv, write_csv
 from kalshi_bot.sports.teams import match_pair, team_score
 from kalshi_bot.sports.venues import Contract, Matched, kalshi_contracts, kalshi_event_date, polymarket_contracts
 
@@ -62,12 +62,6 @@ def test_fair_from_event_averages_sharp_books_and_ignores_others():
     assert fair_from_event(event, "nfl", ["circa"]) is None
 
 
-def test_winner_from_score():
-    ev = {"completed": True, "scores": [{"name": "A", "score": "24"}, {"name": "B", "score": "17"}]}
-    assert winner_from_score(ev) == "A"
-    assert winner_from_score({**ev, "completed": False}) is None
-
-
 # --- fees and team matching --------------------------------------------------
 
 
@@ -107,7 +101,7 @@ def test_kalshi_contracts_match_by_team_and_date():
         {"ticker": "KXNFLGAME-26NOV08LVKC-KC", "event_ticker": "KXNFLGAME-26NOV08LVKC", "yes_sub_title": "Kansas City"},
         {"ticker": "KXNFLGAME-26NOV08LVKC-LV", "event_ticker": "KXNFLGAME-26NOV08LVKC", "yes_sub_title": "Las Vegas"},
     ]
-    out = kalshi_contracts(markets, [game()], "quadratic", 1.0)
+    out = kalshi_contracts(markets, [game()])
     assert {(m.contract.market_id, m.team) for m in out} == {
         ("KXNFLGAME-26NOV01LVKC-KC", "Kansas City Chiefs"), ("KXNFLGAME-26NOV01LVKC-LV", "Las Vegas Raiders")}
     kc = next(m for m in out if m.team == "Kansas City Chiefs")
@@ -130,163 +124,127 @@ def test_polymarket_contracts_split_long_and_short():
     assert polymarket_contracts([{**events[0], "live": True}], [game()]) == []
 
 
-# --- edge and sizing -----------------------------------------------------------
+# --- results -------------------------------------------------------------------
 
 
-def test_kelly_fraction():
-    assert kelly_fraction(0.60, 0.50) == pytest.approx(0.2)
-    assert kelly_fraction(0.50, 0.55) == 0
+def test_parse_espn_scoreboard():
+    data = {"events": [
+        {"id": "401", "date": "2025-10-26T17:00Z", "status": {"type": {"name": "STATUS_FINAL", "state": "post"}},
+         "competitions": [{"neutralSite": False, "status": {"type": {"state": "post", "completed": True}},
+                           "competitors": [
+                               {"homeAway": "home", "score": "10", "team": {"displayName": "Atlanta Falcons"}},
+                               {"homeAway": "away", "score": "34", "team": {"displayName": "Miami Dolphins"}}]}]},
+        {"id": "402", "date": "2026-11-01T18:00Z", "status": {"type": {"name": "STATUS_SCHEDULED", "state": "pre"}},
+         "competitions": [{"neutralSite": True, "status": {"type": {"state": "pre"}}, "competitors": [
+             {"homeAway": "home", "score": "0", "team": {"displayName": "Kansas City Chiefs"}},
+             {"homeAway": "away", "score": "0", "team": {"displayName": "Las Vegas Raiders"}}]}]},
+    ]}
+    done, upcoming = parse_scoreboard(data, "nfl")
+    assert (done.home, done.away, done.home_score, done.away_score, done.final) == (
+        "Atlanta Falcons", "Miami Dolphins", 10.0, 34.0, True)
+    assert done.start_time == datetime(2025, 10, 26, 17, 0, tzinfo=timezone.utc)
+    assert upcoming.state == "pre" and upcoming.neutral and upcoming.home_score is None and not upcoming.final
 
 
-def test_fairly_priced_contract_only_gets_a_bid_behind_the_book():
-    d = evaluate(matched(0.59, 0.61, fair=0.60), SportsConfig(), 0)
-    assert d.kind == "maker" and d.price == 0.58
-    assert evaluate(matched(0.59, 0.61, fair=0.59), SportsConfig(), 0).price == 0.57
+def test_results_csv_round_trip(tmp_path):
+    g = GameResult("1", "nfl", "2025-10-26T17:00:00+00:00", "A", "B", False, "post", 10.0, 34.0)
+    write_csv(tmp_path / "x.csv", [g])
+    assert read_csv(tmp_path / "x.csv") == [g]
 
 
-def test_taker_when_ask_beats_fair_after_fee():
-    cfg = SportsConfig(bankroll=1000)
-    d = evaluate(matched(0.53, 0.55, fair=0.60), cfg, 0)
-    assert d.kind == "taker" and d.price == 0.55
-    assert d.edge >= cfg.taker_min_edge
-    # quarter Kelly of (0.60 - c) / (1 - c), capped at 3% of bankroll on one game
-    assert d.price * d.contracts + d.fee <= 0.03 * 1000 + 1e-9
+# --- model ------------------------------------------------------------------------
 
 
-def test_taker_size_is_capped_by_book_depth():
-    d = evaluate(matched(0.53, 0.55, fair=0.60, ask_size=7), SportsConfig(bankroll=10_000), 0)
-    assert d.kind == "taker" and d.contracts == 7
+def result(day, home, away, hs, as_, league="nfl"):
+    start = (datetime(2025, 9, 1, 18, tzinfo=timezone.utc) + timedelta(days=day)).isoformat()
+    return GameResult(f"{day}{home}{away}", league, start, home, away, False, "post", hs, as_)
 
 
-def test_maker_bids_one_tick_over_the_bid_when_taking_is_too_thin():
-    cfg = SportsConfig(bankroll=1000)
-    d = evaluate(matched(0.55, 0.59, fair=0.60), cfg, 0)
-    assert d.kind == "maker" and d.price == 0.56 and d.fee == 0
-    assert d.edge >= cfg.maker_min_edge
+def test_elo_home_advantage_and_updates():
+    elo = Elo(PARAMS["nfl"])
+    assert elo.predict("A", "B") == pytest.approx(1 / (1 + 10 ** (-48 / 400)))
+    assert elo.predict("A", "B", neutral=True) == pytest.approx(0.5)
+    p = elo.update(result(0, "A", "B", 30, 10))
+    assert p > 0.5
+    assert elo.ratings["A"] > 1500 > elo.ratings["B"]
+    assert elo.ratings["A"] + elo.ratings["B"] == pytest.approx(3000)
 
 
-def test_maker_price_never_gives_up_the_edge_or_crosses():
-    cfg = SportsConfig()
-    assert maker_price(matched(0.59, 0.61, fair=0.60), cfg) == 0.58  # caps at fair - min edge
-    assert maker_price(matched(0.40, 0.45, fair=0.60), cfg) == 0.41
-    assert maker_price(matched(0.55, 0.56, fair=0.60), cfg) == 0.55  # one tick under the ask at most
+def test_bigger_wins_move_ratings_more_but_with_diminishing_returns():
+    assert margin_multiplier(21, 0) > margin_multiplier(3, 0)
+    assert margin_multiplier(21, 0) - margin_multiplier(14, 0) < margin_multiplier(14, 0) - margin_multiplier(7, 0)
+    assert margin_multiplier(14, 200) < margin_multiplier(14, 0)  # expected blowouts count less
 
 
-def test_game_exposure_cap_stops_new_orders():
+def test_ratings_regress_toward_average_in_the_offseason():
+    elo = Elo(EloParams(k=20, home_advantage=0, season_revert=0.5))
+    for d in range(10):
+        elo.update(result(d * 7, "A", "B", 30, 10))
+    gap_now = elo.rating("A") - 1500
+    next_season = elo.last_played["A"] + timedelta(days=200)
+    assert elo.rating("A", next_season) - 1500 == pytest.approx(gap_now * 0.5)
+
+
+def test_strong_team_becomes_favourite_and_backtest_scores_it():
+    games = []
+    for d in range(60):
+        # A beats everyone, B loses to everyone, C and D split
+        games += [result(d * 3, "A", "C", 28, 14), result(d * 3 + 1, "D", "B", 21, 7), result(d * 3 + 2, "C", "D", 17, 14 + (d % 2) * 6)]
+    elo = Elo(PARAMS["nfl"]).fit(games)
+    assert elo.predict("B", "A") < 0.15
+    r = backtest(games, PARAMS["nfl"], parse_time(games[60].start))
+    assert r["games"] == 120
+    assert r["accuracy"] > 0.6
+    assert r["log_loss"] < r["baseline_log_loss"]
+
+
+# --- plays ------------------------------------------------------------------------
+
+
+def trained_elo():
+    games = [result(d, "Kansas City Chiefs" if d % 2 else "X", "Las Vegas Raiders" if d % 2 else "Y", 27, 13) for d in range(20)]
+    return Elo(PARAMS["nfl"]).fit(games)
+
+
+def test_model_games_and_plays_rank_by_ev():
+    elo = trained_elo()
+    upcoming = [GameResult("g1", "nfl", KICKOFF.isoformat(), "Kansas City Chiefs", "Las Vegas Raiders", False, "pre")]
+    [g] = model_games(upcoming, elo)
+    p_kc = g.fair["Kansas City Chiefs"]
+    assert p_kc > 0.7 and g.fair["Las Vegas Raiders"] == pytest.approx(1 - p_kc)
+
+    kc = Matched(Contract("kalshi", "KC", "Kansas City", "yes", 0.55, 0.57), g, "Kansas City Chiefs")
+    lv = Matched(Contract("polymarket", "s", "Raiders", "short", 0.40, 0.42), g, "Las Vegas Raiders")
+    no_ask = Matched(Contract("kalshi", "LV", "Las Vegas", "yes", 0.40, None), g, "Las Vegas Raiders")
+    plays = plays_for([lv, kc, no_ask], elo, SportsConfig(), {("Kansas City Chiefs", "Las Vegas Raiders", "Kansas City Chiefs"): 0.6})
+    assert [p.team for p in plays] == ["Kansas City Chiefs", "Las Vegas Raiders"]
+    best = plays[0]
+    assert best.fee == pytest.approx(0.07 * 0.57 * 0.43, abs=0.001)
+    assert best.ev == pytest.approx(p_kc / (0.57 + best.fee) - 1)
+    assert best.sharp_p == 0.6 and plays[1].sharp_p is None
+    assert best.flagged(SportsConfig()) and not plays[1].flagged(SportsConfig())
+
+
+def test_stake_is_quarter_kelly_capped_per_game():
+    elo = trained_elo()
+    upcoming = [GameResult("g1", "nfl", KICKOFF.isoformat(), "Kansas City Chiefs", "Las Vegas Raiders", False, "pre")]
+    [g] = model_games(upcoming, elo)
+    m = Matched(Contract("polymarket", "s", "Chiefs", "long", 0.30, 0.32), g, "Kansas City Chiefs")
+    [play] = plays_for([m], elo, SportsConfig())
     cfg = SportsConfig(bankroll=1000, max_game_pct=0.03)
-    assert evaluate(matched(0.53, 0.55, fair=0.60), cfg, game_exposure=30) is None
+    assert play.stake(cfg) == 30.0
+    cfg = SportsConfig(bankroll=1000, max_game_pct=1.0)
+    kelly = play.edge / (1 - play.cost)
+    assert play.stake(cfg) == pytest.approx(0.25 * kelly * 1000, abs=0.01)
 
 
-def test_polymarket_maker_pays_no_fee():
-    d = evaluate(matched(0.55, 0.59, fair=0.60, venue="polymarket"), SportsConfig(), 0)
-    assert d.kind == "maker" and d.fee == 0
-
-
-# --- engine and ledger -----------------------------------------------------------
-
-
-class FakeOdds:
-    def __init__(self, games):
-        self.games = games
-        self.score_events = []
-
-    def fair_values(self, league, sport, books, method):
-        return self.games if league == "nfl" else []
-
-    def scores(self, sport):
-        return self.score_events
-
-
-class FakeVenue:
-    def __init__(self, contracts):
-        self.contracts_ = contracts
-
-    def contracts(self, league, games):
-        return self.contracts_ if league is LEAGUES["nfl"] else []
-
-
-class Clock:
-    def __init__(self, t):
-        self.t = t
-
-    def __call__(self):
-        return self.t
-
-
-def make_engine(contracts, games, clock):
-    cfg = SportsConfig(leagues=["nfl"], venues=["kalshi"], bankroll=1000, ledger_path=":memory:")
-    return Engine(cfg, FakeOdds(games), {"kalshi": FakeVenue(contracts)}, Ledger(":memory:"), now=clock)
-
-
-def test_paper_cycle_rests_fills_records_clv_and_settles():
-    clock = Clock(NOW)
-    g = game(0.60)
-    m = matched(0.55, 0.59, g=g)
-    engine = make_engine([m], [g], clock)
-
-    events = engine.cycle()
-    assert any(e.startswith("maker paper kalshi") for e in events)
-    [order] = engine.ledger.resting("paper")
-    assert order["price"] == 0.56
-
-    # nothing changes: the order stays, no duplicate is placed
-    clock.t = NOW + timedelta(minutes=5)
-    engine.cycle()
-    assert len(engine.ledger.resting("paper")) == 1
-
-    # a seller drops the ask to our price: paper fill
-    m.contract.ask = 0.56
-    clock.t = NOW + timedelta(minutes=10)
-    events = engine.cycle()
-    assert any(e.startswith("paper fill") for e in events)
-    filled = engine.ledger.db.execute("SELECT price FROM orders WHERE status = 'filled'").fetchall()
-    assert [r["price"] for r in filled] == [0.56]
-
-    # sharp line moves to 0.62 before kickoff; after kickoff that becomes the closing line
-    g.fair = {"Kansas City Chiefs": 0.62, "Las Vegas Raiders": 0.38}
-    m.contract.bid, m.contract.ask = 0.61, 0.63
-    clock.t = KICKOFF - timedelta(minutes=30)
-    engine.cycle()
-    clock.t = KICKOFF + timedelta(minutes=1)
-    engine.cycle()
-    row = engine.ledger.db.execute("SELECT * FROM orders WHERE status = 'filled'").fetchone()
-    assert row["closing_fair"] == pytest.approx(0.62)
-    assert row["clv"] == pytest.approx(0.62 - 0.56)
-
-    engine.odds.score_events = [{"id": "g1", "completed": True, "home_team": "Kansas City Chiefs",
-                                 "away_team": "Las Vegas Raiders", "scores": [
-                                     {"name": "Kansas City Chiefs", "score": "27"}, {"name": "Las Vegas Raiders", "score": "20"}]}]
-    engine.settle()
-    report = engine.ledger.report("paper")
-    n = row["contracts"]
-    assert report["overall"]["pnl"] == pytest.approx(n * (1 - 0.56))
-    assert report["overall"]["avg_clv"] == pytest.approx(0.06)
-
-
-def test_resting_order_cancelled_when_fair_drops_and_before_start():
-    clock = Clock(NOW)
-    g = game(0.60)
-    m = matched(0.55, 0.59, g=g)
-    engine = make_engine([m], [g], clock)
-    engine.cycle()
-    g.fair = {"Kansas City Chiefs": 0.55, "Las Vegas Raiders": 0.45}
-    events = engine.cycle()
-    assert any("fair moved" in e for e in events)
-    [order] = engine.ledger.resting("paper")
-    assert order["price"] == 0.53  # re-quoted below the new fair value
-    clock.t = KICKOFF - timedelta(minutes=2)
-    events = engine.cycle()
-    assert any("game starting" in e for e in events)
-    assert engine.ledger.resting("paper") == []
-
-
-def test_scan_places_nothing():
-    clock = Clock(NOW)
-    g = game(0.60)
-    engine = make_engine([matched(0.53, 0.55, g=g)], [g], clock)
-    events = engine.cycle(trade=False)
-    assert len(events) == 1 and "taker" in events[0]
-    assert engine.ledger.db.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
+def test_teams_without_history_are_marked_thin_and_not_flagged():
+    elo = Elo(PARAMS["nfl"])
+    upcoming = [GameResult("g1", "nfl", KICKOFF.isoformat(), "Kansas City Chiefs", "Las Vegas Raiders", False, "pre")]
+    [g] = model_games(upcoming, elo)
+    m = Matched(Contract("kalshi", "KC", "Kansas City", "yes", 0.20, 0.22), g, "Kansas City Chiefs")
+    [play] = plays_for([m], elo, SportsConfig())
+    assert play.thin_data and play.ev > 1 and not play.flagged(SportsConfig())
 
 
 def test_config_rejects_unknown_venue():

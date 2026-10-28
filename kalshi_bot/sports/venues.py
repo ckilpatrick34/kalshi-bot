@@ -1,7 +1,6 @@
-"""Read game-winner contracts from each venue and send orders to it.
+"""Read game-winner contract prices from each venue (read-only, no orders).
 
-Every contract is "this team wins, pays $1". The engine only ever buys such a
-contract; it never sells one it doesn't own.
+Every contract is "this team wins, pays $1", so its ask is the price to back that team.
 
 * Kalshi lists one market per team in each game event (KXNFLGAME-26SEP09NESEA has a
   New England market and a Seattle market). Buying a team means a YES bid on its market.
@@ -15,7 +14,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ..client import KalshiClient
-from ..fees import maker_fee, polymarket_us_taker_fee, taker_fee
+from ..fees import polymarket_us_taker_fee, taker_fee
 from ..polymarket_us import PolymarketUSClient, amount
 from .odds import Game, parse_time
 from .teams import match_pair
@@ -33,7 +32,6 @@ class Contract:
     bid: float | None
     ask: float | None
     ask_size: float | None = None
-    fee_type: str = "quadratic"
     fee_multiplier: float = 1.0
 
 
@@ -48,13 +46,12 @@ class Matched:
         return self.game.fair[self.team]
 
 
-def fee(contract: Contract, kind: str, price: float, count: float) -> float:
+def taker_fee_per_contract(contract: Contract, price: float) -> float:
+    """Fee for buying at the ask, per contract, before rounding up to the cent per order."""
     if contract.venue == "kalshi":
-        if kind == "taker":
-            return taker_fee(price, count, contract.fee_multiplier)
-        return maker_fee(price, count, contract.fee_type)
+        return taker_fee(price, 1000, contract.fee_multiplier) / 1000
     if contract.venue == "polymarket":
-        return polymarket_us_taker_fee(price, count) if kind == "taker" else 0.0
+        return polymarket_us_taker_fee(price, 1000) / 1000
     raise ValueError(contract.venue)
 
 
@@ -93,7 +90,7 @@ def _dollars(m: dict, name: str) -> float | None:
     return None
 
 
-def kalshi_contracts(markets: list[dict], games: list[Game], fee_type: str, fee_multiplier: float) -> list[Matched]:
+def kalshi_contracts(markets: list[dict], games: list[Game], fee_multiplier: float = 1.0) -> list[Matched]:
     events: dict[str, list[dict]] = {}
     for m in markets:
         events.setdefault(m["event_ticker"], []).append(m)
@@ -111,7 +108,7 @@ def kalshi_contracts(markets: list[dict], games: list[Game], fee_type: str, fee_
             size = float(m.get("yes_ask_size_fp") or 0) or None
             contract = Contract(
                 "kalshi", m["ticker"], m["yes_sub_title"], "yes",
-                bid if bid else None, ask if ask and ask < 1 else None, size, fee_type, fee_multiplier,
+                bid if bid else None, ask if ask and ask < 1 else None, size, fee_multiplier,
             )
             out.append(Matched(contract, game, mapping[m["yes_sub_title"]]))
     return out
@@ -121,31 +118,15 @@ class KalshiVenue:
     name = "kalshi"
 
     def __init__(self, client: KalshiClient | None = None):
-        # Market data always comes from prod; orders go to KALSHI_ENV (demo unless changed).
-        self.data = KalshiClient(env="prod")
-        self.trading = client or KalshiClient()
-        self._series: dict[str, dict] = {}
+        self.client = client or KalshiClient(env="prod")  # public market data only
+        self._fee_multiplier: dict[str, float] = {}
 
     def contracts(self, league, games: list[Game]) -> list[Matched]:
-        if league.kalshi_series not in self._series:
-            self._series[league.kalshi_series] = self.data.get_series(league.kalshi_series)
-        s = self._series[league.kalshi_series]
-        markets = list(self.data.markets(series_ticker=league.kalshi_series, status="open"))
-        return kalshi_contracts(markets, games, s.get("fee_type", "quadratic"), float(s.get("fee_multiplier", 1)))
-
-    def place(self, contract: Contract, price: float, count: float, post_only: bool) -> str:
-        resp = self.trading.create_order(contract.market_id, "bid", count, price, post_only=post_only)
-        order = resp.get("order", resp)
-        return order.get("order_id") or order.get("id")
-
-    def status(self, venue_order_id: str) -> tuple[str, float]:
-        o = self.trading.get_order(venue_order_id)
-        filled = float(o.get("fill_count_fp") or o.get("fill_count") or 0)
-        state = {"resting": "resting", "executed": "filled"}.get(o.get("status"), "cancelled")
-        return state, filled
-
-    def cancel(self, contract_market_id: str, venue_order_id: str) -> None:
-        self.trading.cancel_order(venue_order_id)
+        series = league.kalshi_series
+        if series not in self._fee_multiplier:
+            self._fee_multiplier[series] = float(self.client.get_series(series).get("fee_multiplier", 1))
+        markets = list(self.client.markets(series_ticker=series, status="open"))
+        return kalshi_contracts(markets, games, self._fee_multiplier[series])
 
 
 # --- Polymarket US ----------------------------------------------------------
@@ -199,27 +180,6 @@ class PolymarketVenue:
 
     def contracts(self, league, games: list[Game]) -> list[Matched]:
         return polymarket_contracts(self.client.league_events(league.polymarket_league), games, self.client.bbo)
-
-    def ask_size(self, contract: Contract) -> float | None:
-        data = self.client.bbo(contract.market_id)
-        shares = data.get("askShares" if contract.side == "long" else "bidShares")
-        return float(shares) if shares not in (None, "") else None
-
-    def place(self, contract: Contract, price: float, count: float, post_only: bool) -> str:
-        # BUY_SHORT is priced as the NO contract's price, the same way this engine prices it.
-        intent = "ORDER_INTENT_BUY_LONG" if contract.side == "long" else "ORDER_INTENT_BUY_SHORT"
-        return self.client.create_order(contract.market_id, intent, price, count, post_only)["id"]
-
-    def status(self, venue_order_id: str) -> tuple[str, float]:
-        o = self.client.get_order(venue_order_id)
-        filled = float(o.get("cumQuantity") or 0)
-        state = o.get("state", "")
-        if state in ("ORDER_STATE_NEW", "ORDER_STATE_PARTIALLY_FILLED", "ORDER_STATE_PENDING_NEW", "ORDER_STATE_PENDING_RISK"):
-            return "resting", filled
-        return ("filled" if state == "ORDER_STATE_FILLED" else "cancelled"), filled
-
-    def cancel(self, contract_market_id: str, venue_order_id: str) -> None:
-        self.client.cancel_order(venue_order_id, contract_market_id)
 
 
 def build_venues(names: list[str]) -> dict:

@@ -173,8 +173,5 @@ class KalshiClient:
         }
         return self._request("POST", "/portfolio/events/orders", auth=True, json=body)
 
-    def get_order(self, order_id: str) -> dict:
-        return self._request("GET", f"/portfolio/orders/{order_id}", auth=True).get("order", {})
-
     def cancel_order(self, order_id: str) -> dict:
         return self._request("DELETE", f"/portfolio/orders/{order_id}", auth=True)
