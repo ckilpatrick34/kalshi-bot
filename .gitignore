@@ -5,3 +5,6 @@ data/
 *.pem
 *.key
 .env
+*.egg-info/
+.env
+.venv/
