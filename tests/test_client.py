@@ -35,3 +35,22 @@ def test_prod_orders_blocked_without_explicit_flag(rsa_key, monkeypatch):
     monkeypatch.delenv("KALSHI_ALLOW_LIVE", raising=False)
     with pytest.raises(LiveTradingNotAllowed):
         KalshiClient(env="prod").create_order("T", "bid", 1, 0.5)
+
+
+def test_polymarket_us_signature_and_live_guard(monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    from kalshi_bot import polymarket_us
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    raw = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    monkeypatch.setenv("POLYMARKET_US_KEY_ID", "test-key")
+    monkeypatch.setenv("POLYMARKET_US_SECRET_KEY", base64.b64encode(raw + key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode())
+    client = polymarket_us.PolymarketUSClient()
+    sig = client.sign("1703123456789", "post", "/v1/orders")
+    key.public_key().verify(base64.b64decode(sig), b"1703123456789POST/v1/orders")
+
+    monkeypatch.delenv("POLYMARKET_US_ALLOW_LIVE", raising=False)
+    with pytest.raises(polymarket_us.LiveTradingNotAllowed):
+        client.create_order("slug", "ORDER_INTENT_BUY_LONG", 0.5, 1)
