@@ -27,10 +27,13 @@ class LongshotMaker(Strategy):
     min_hours_to_close: float = 0.0
     max_hours_to_close: float = 72.0
     sides: tuple = ("yes", "no")  # which cheap side(s) to sell
+    # Sports markets close early when the game ends, so a settled market's close_time
+    # leaks the result timing. Use "expected_expiration_time" there, which is known up front.
+    clock: str = "close_time"
 
     def on_trade(self, ctx: Context, trade) -> None:
         ticker, p = trade.ticker, trade.price
-        hours_left = (ctx.market(ticker)["close_time"] - ctx.now).total_seconds() / 3600
+        hours_left = (ctx.market(ticker)[self.clock] - ctx.now).total_seconds() / 3600
         in_window = self.min_hours_to_close <= hours_left <= self.max_hours_to_close
         pos = ctx.position(ticker)
 

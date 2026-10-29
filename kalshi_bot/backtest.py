@@ -218,31 +218,40 @@ class Backtester:
 
     # --- main loop --------------------------------------------------------
 
+    def add_market(self, market: dict) -> None:
+        self.markets[market["ticker"]] = market
+
+    def process_trade(self, trade, strategy: Strategy, ctx: Context) -> None:
+        """Feed one trade: fill resting orders, update risk, then let the strategy react."""
+        if trade.ts > self.markets[trade.ticker]["close_time"]:
+            return
+        self.now = trade.ts
+        self._match_resting(trade)
+        self.last_price[trade.ticker] = trade.price
+        self.last_size[trade.ticker] = trade.count
+        equity = self.equity()
+        self.risk.update(self.now, equity)
+        if not self.risk.trading_allowed:
+            self.resting.clear()
+        else:
+            strategy.on_trade(ctx, trade)
+        self.equity_curve.append((self.now, equity))
+
+    def settle(self, ticker: str, now: pd.Timestamp, strategy: Strategy, ctx: Context) -> None:
+        self.now = now
+        self._settle(ticker, strategy, ctx)
+
     def run(self, strategy: Strategy) -> "BacktestResult":
         ctx = Context(self)
         closes = sorted((m["close_time"], t) for t, m in self.markets.items())
         ci = 0
         for trade in self.trades.itertuples(index=False):
             while ci < len(closes) and closes[ci][0] < trade.ts:
-                self.now = closes[ci][0]
-                self._settle(closes[ci][1], strategy, ctx)
+                self.settle(closes[ci][1], closes[ci][0], strategy, ctx)
                 ci += 1
-            if trade.ts > self.markets[trade.ticker]["close_time"]:
-                continue
-            self.now = trade.ts
-            self._match_resting(trade)
-            self.last_price[trade.ticker] = trade.price
-            self.last_size[trade.ticker] = trade.count
-            equity = self.equity()
-            self.risk.update(self.now, equity)
-            if not self.risk.trading_allowed:
-                self.resting.clear()
-            else:
-                strategy.on_trade(ctx, trade)
-            self.equity_curve.append((self.now, equity))
+            self.process_trade(trade, strategy, ctx)
         for close_time, ticker in closes[ci:]:
-            self.now = close_time
-            self._settle(ticker, strategy, ctx)
+            self.settle(ticker, close_time, strategy, ctx)
         self.equity_curve.append((self.now, self.equity()))
         return BacktestResult(self)
 
