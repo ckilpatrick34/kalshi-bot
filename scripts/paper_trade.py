@@ -1,6 +1,7 @@
-"""Paper-trade the NBA longshot strategy on live Kalshi trades. No account or key needed.
+"""Paper-trade the validated longshot settings on live Kalshi trades. No account or key needed.
 
-    python scripts/paper_trade.py --out paper
+    python scripts/paper_trade.py --out paper                 # every configured series
+    python scripts/paper_trade.py --series KXNBAGAME --out paper
 
 Polls public trades for open markets in the series, runs the same strategy and fill model
 as the backtest, and settles positions when Kalshi settles the market. Every fill,
@@ -16,12 +17,25 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from kalshi_bot.backtest import Backtester, BacktestConfig, Context
+from kalshi_bot.backtest import Backtester, BacktestConfig, Context, Strategy
 from kalshi_bot.client import KalshiClient
 from kalshi_bot.data import normalize_trades
 from kalshi_bot.strategies import LongshotMaker
 
-STRATEGY = dict(max_cheap=0.05, edge=0.01, max_hours_to_close=6, sides=("yes", "no"), clock="expected_expiration_time")
+# Settings per series, each validated on markets it was not tuned on (see the backtest summary).
+STRATEGIES = {
+    "KXNBAGAME": dict(max_cheap=0.05, edge=0.01, max_hours_to_close=6, sides=("yes", "no"), clock="expected_expiration_time"),
+}
+
+
+class BySeries(Strategy):
+    """Route each market's trades to the strategy configured for its series."""
+
+    def __init__(self, strategies: dict[str, Strategy]):
+        self.strategies = strategies
+
+    def on_trade(self, ctx: Context, trade) -> None:
+        self.strategies[ctx.market(trade.ticker)["series_ticker"]].on_trade(ctx, trade)
 
 
 def log(out: Path, event: str, **fields) -> None:
@@ -32,32 +46,36 @@ def log(out: Path, event: str, **fields) -> None:
 
 
 class PaperTrader:
-    def __init__(self, client: KalshiClient, series: str, out: Path, cash: float):
+    def __init__(self, client: KalshiClient, series: list[str], out: Path, cash: float):
         self.client, self.series, self.out = client, series, out
-        self.fee_type = client.get_series(series).get("fee_type", "quadratic")
+        self.fee_types = {s: client.get_series(s).get("fee_type", "quadratic") for s in series}
         self.engine = Backtester(pd.DataFrame(columns=["ticker"]), pd.DataFrame(columns=["ts", "ticker"]),
                                  BacktestConfig(starting_cash=cash))
-        self.strategy, self.ctx = LongshotMaker(**STRATEGY), Context(self.engine)
+        self.strategy = BySeries({s: LongshotMaker(**STRATEGIES[s]) for s in series})
+        self.ctx = Context(self.engine)
         self.last_seen: dict[str, pd.Timestamp] = {}
         self.seen_ids: set[str] = set()
         self.n_fills = self.n_settled = 0
 
     def poll_once(self) -> None:
         engine, now = self.engine, pd.Timestamp.now(tz="UTC")
-        open_markets = {m["ticker"]: m for m in self.client.markets(series_ticker=self.series, status="open")}
-        for t, m in open_markets.items():
+        open_markets = {}
+        for series in self.series:
+            for m in self.client.markets(series_ticker=series, status="open"):
+                open_markets[m["ticker"]] = (series, m)
+        for t, (series, m) in open_markets.items():
             if t not in engine.markets:
                 engine.add_market({
-                    "ticker": t, "event_ticker": m["event_ticker"], "series_ticker": self.series,
-                    "fee_type": self.fee_type, "result": None,
+                    "ticker": t, "event_ticker": m["event_ticker"], "series_ticker": series,
+                    "fee_type": self.fee_types[series], "result": None,
                     "close_time": pd.Timestamp(m["close_time"]),
                     "expected_expiration_time": pd.Timestamp(m["expected_expiration_time"]),
                 })
 
         # Only markets inside the trading window need trades; that keeps polling light.
-        window = STRATEGY["max_hours_to_close"] + 0.5
         active = [t for t, m in engine.markets.items() if t in open_markets
-                  and (m["expected_expiration_time"] - now).total_seconds() / 3600 <= window]
+                  and (m["expected_expiration_time"] - now).total_seconds() / 3600
+                  <= STRATEGIES[m["series_ticker"]]["max_hours_to_close"] + 0.5]
         records = []
         for t in active:
             params = {"ticker": t}
@@ -93,7 +111,7 @@ class PaperTrader:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--series", default="KXNBAGAME")
+    parser.add_argument("--series", nargs="+", default=list(STRATEGIES), choices=list(STRATEGIES))
     parser.add_argument("--out", type=Path, default=Path("paper"))
     parser.add_argument("--cash", type=float, default=500.0)
     parser.add_argument("--poll", type=float, default=20.0, help="seconds between polls")
@@ -102,7 +120,7 @@ def main() -> None:
 
     client = KalshiClient(env="prod")  # public data only; this script never sends orders
     trader = PaperTrader(client, args.series, args.out, args.cash)
-    log(args.out, "start", strategy=STRATEGY, cash=args.cash, series=args.series)
+    log(args.out, "start", strategies={s: STRATEGIES[s] for s in args.series}, cash=args.cash, series=args.series)
     while True:
         try:
             trader.poll_once()
