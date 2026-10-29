@@ -25,6 +25,10 @@ from kalshi_bot.strategies import LongshotMaker
 # Settings per series, each validated on markets it was not tuned on (see the backtest summary).
 STRATEGIES = {
     "KXNBAGAME": dict(max_cheap=0.05, edge=0.01, max_hours_to_close=6, sides=("yes", "no"), clock="expected_expiration_time"),
+    # Candidate only: best 2025-season setting made about +5% on 2026 games, too weak to trade.
+    # Paper-traded to gather live evidence.
+    "KXNCAAFGAME": dict(min_cheap=0.02, max_cheap=0.03, edge=0.02, max_hours_to_close=24, sides=("yes", "no"),
+                        clock="expected_expiration_time"),
 }
 
 
