@@ -12,3 +12,4 @@ include = ["kalshi_bot*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]

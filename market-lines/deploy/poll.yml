@@ -1,0 +1,30 @@
+# Copy to .github/workflows/poll.yml in the marketlines repository.
+# Secrets: ODDS_API_KEY, MARKETLINES_DB (Supabase Postgres connection string).
+# GitHub runs scheduled workflows late at busy times, so for steam and fresh
+# closes prefer `python -m marketlines run` on an always-on host.
+# Every 10 minutes for two sports is about 26,000 credits a month; `run` paces itself instead.
+name: poll odds
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install '.[postgres]'
+      - run: python -m marketlines poll --sports ncaaf,ncaab
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          MARKETLINES_DB: ${{ secrets.MARKETLINES_DB }}
