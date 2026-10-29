@@ -9,7 +9,9 @@ from pathlib import Path
 import pandas as pd
 
 TRADE_COLUMNS = ["ts", "ticker", "price", "count", "taker_side"]
-MARKET_COLUMNS = ["ticker", "event_ticker", "series_ticker", "open_time", "close_time", "result", "fee_type"]
+MARKET_COLUMNS = [
+    "ticker", "event_ticker", "series_ticker", "open_time", "close_time", "expected_expiration_time", "result", "fee_type"
+]
 
 
 def _dollars(record: dict, name: str) -> float | None:
@@ -49,13 +51,15 @@ def normalize_markets(records: list[dict], series_ticker: str, fee_type: str = "
             "series_ticker": series_ticker,
             "open_time": pd.Timestamp(r["open_time"]),
             "close_time": pd.Timestamp(r["close_time"]),
+            # Known before trading starts, unlike close_time on markets that close early (sports).
+            "expected_expiration_time": pd.Timestamp(r.get("expected_expiration_time") or r["close_time"]),
             "result": r.get("result") or None,
             "fee_type": fee_type,
         }
         for r in records
     ]
     df = pd.DataFrame(rows, columns=MARKET_COLUMNS)
-    for col in ("open_time", "close_time"):
+    for col in ("open_time", "close_time", "expected_expiration_time"):
         df[col] = pd.to_datetime(df[col], utc=True)
     return df
 

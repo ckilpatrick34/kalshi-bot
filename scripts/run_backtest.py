@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--split", type=pd.Timestamp, required=True)
     parser.add_argument("--cash", type=float, default=500.0)
     parser.add_argument("--series", nargs="*", help="only these series (default: everything under --data)")
+    parser.add_argument("--clock", default="close_time", help='"expected_expiration_time" for markets that close early')
     args = parser.parse_args()
 
     markets, trades = load_dataset(args.data, args.series)
@@ -46,14 +47,14 @@ def main() -> None:
     rows = []
     for values in itertools.product(*GRID.values()):
         params = dict(zip(GRID, values))
-        result = Backtester(*train, BacktestConfig(starting_cash=args.cash)).run(LongshotMaker(**params))
+        result = Backtester(*train, BacktestConfig(starting_cash=args.cash)).run(LongshotMaker(**params, clock=args.clock))
         rows.append({**params, **result.summary()})
     table = pd.DataFrame(rows).sort_values("return_pct", ascending=False)
     print(f"\nTried {len(table)} settings on the training period. Top 10:")
     print(table.head(10).to_string(index=False))
 
     best = {k: table.iloc[0][k] for k in GRID}
-    result = Backtester(*test, BacktestConfig(starting_cash=args.cash)).run(LongshotMaker(**best))
+    result = Backtester(*test, BacktestConfig(starting_cash=args.cash)).run(LongshotMaker(**best, clock=args.clock))
     print(f"\nOut-of-sample with {best}:")
     for k, v in result.summary().items():
         print(f"  {k}: {v}")
