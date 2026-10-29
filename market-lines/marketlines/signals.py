@@ -8,6 +8,8 @@
   leans to favourites and overs, so this stands in for RLM. It is logged as its own
   type so the CLV ledger can judge it separately.
 * divergence: one book's number is off the sharp consensus by enough to be +EV.
+* model: the ratings model (model.py) prices a book's number as +EV. Logged in the
+  same ledger, so the model is judged on CLV like every other signal.
 
 Each signal names the book and number a user could bet at signal time, and the
 fair probability the consensus gave that number. CLV is computed later against
@@ -17,6 +19,7 @@ the close (see clv.py).
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from .model import cover_prob, over_prob, win_prob
 from .lines import SIDES, Line, Timeline, best_line, consensus, equivalent, ref_point, shift_prob, side_fair
 from .sports import Sport
 
@@ -199,8 +202,53 @@ def divergence(sport: Sport, market: str, event_id: str, tl: Timeline, t1: datet
     return out
 
 
+def model_prob_a(market: str, point: float | None, projection: tuple) -> float:
+    """The model's probability for side A at a book's number."""
+    margin, total, sd_margin, sd_total = projection
+    if market == "h2h":
+        return win_prob(margin, sd_margin)
+    if market == "spreads":
+        return cover_prob(margin, point, sd_margin)
+    return over_prob(total, point, sd_total)
+
+
+def model_edge(sport: Sport, market: str, event_id: str, tl: Timeline, t1: datetime,
+               projection: tuple | None) -> list[Signal]:
+    """The best-priced book per side where the model sees enough edge. Fires once per side."""
+    if projection is None:
+        return []
+    now = tl.at(t1)
+    cons = consensus(sport, market, now)
+    if cons is None:
+        return []
+    out = []
+    for side in ("a", "b"):
+        best = None
+        for line in now:
+            if market != "h2h" and line.point is None:
+                continue
+            p_a = model_prob_a(market, line.point, projection)
+            fair = p_a if side == "a" else 1 - p_a
+            ev = fair * line.price(side) - 1
+            if ev >= sport.model_ev and (best is None or ev > best[2]):
+                best = (line, fair, ev)
+        if best is None:
+            continue
+        line, fair, ev = best
+        margin, total = projection[0], projection[1]
+        detail = {"model_margin": round(margin, 2), "model_total": round(total, 2), "ev": round(ev, 4),
+                  "market_fair": round(side_fair(sport, market, cons, side, line.point), 4)}
+        out.append(Signal(
+            event_id=event_id, sport=sport.name, market=market, kind="model", side=side,
+            book=line.book, line=line.point, price=line.price(side), fair=fair,
+            cons_point=cons.point, cons_fair_a=cons.fair_a, score=_clip(30 + 800 * ev),
+            fired_at=t1, detail=detail, key=f"{event_id}:{market}:model:{side}",
+        ))
+    return out
+
+
 def detect(sport: Sport, market: str, event_id: str, tl: Timeline, t0: datetime | None, t1: datetime,
-           ticket_share_a: float | None = None) -> list[Signal]:
+           ticket_share_a: float | None = None, projection: tuple | None = None) -> list[Signal]:
     """All signals for one event and market at poll time t1 (t0 is the previous poll)."""
     if len(tl.at(t1)) < sport.min_books:
         return []
@@ -210,4 +258,5 @@ def detect(sport: Sport, market: str, event_id: str, tl: Timeline, t0: datetime 
         *drift(sport, market, event_id, tl, t1),
         *rlm(sport, market, event_id, tl, t1, ticket_share_a),
         *divergence(sport, market, event_id, tl, t1),
+        *model_edge(sport, market, event_id, tl, t1, projection),
     ]

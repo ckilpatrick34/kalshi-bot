@@ -5,13 +5,14 @@ side-A win/cover probability) so one detector works for moneylines, spreads and
 totals. A spread or total line is converted to a probability at a common point
 with the margin tables below.
 
-The margin tables are starting estimates, not fitted values. P(final margin == k)
-for college football puts extra mass on 3, 7, 10, 14 and 17; college basketball
-margins are close to flat near zero. Refit both from final scores once the
-snapshot history has a season of results (see README).
+The tables below are starting estimates. P(final margin == k) for college football
+puts extra mass on 3, 7, 10, 14 and 17; college basketball margins are close to
+flat near zero. `fit` refits them from collected final scores and stores them, and
+`use_fitted_tables` swaps them in (margin tables hold P(margin == k) for one sign
+of k, keyed by |k|).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 
@@ -52,6 +53,7 @@ class Sport:
     rlm_move: float = 0.03
     rlm_public_share: float = 0.60
     divergence_ev: float = 0.025
+    model_ev: float = 0.04
     min_books: int = 3
     sharp_books: tuple[str, ...] = ("pinnacle", "circasports", "lowvig", "betonlineag")
     books: tuple[str, ...] = field(default=(
@@ -90,3 +92,24 @@ SPORTS = {
         steam_books=2,
     ),
 }
+
+BASE = dict(SPORTS)  # the hand-set tables, used as priors when refitting
+
+
+def table_mass(table: dict[int, float], fallback: Callable[[int], float], symmetric: bool) -> Callable[[int], float]:
+    def mass(k: int) -> float:
+        key = abs(k) if symmetric else k
+        return table[key] if key in table else fallback(k)
+    return mass
+
+
+def use_fitted_tables(tables: dict[tuple[str, str], dict[int, float]]):
+    """Swap in margin and total tables refit from final scores (see model.fit_mass)."""
+    for (name, kind), table in tables.items():
+        sport = SPORTS.get(name)
+        if sport is None or not table:
+            continue
+        if kind == "margin":
+            SPORTS[name] = replace(sport, margin_mass=table_mass(table, sport.margin_mass, symmetric=True))
+        elif kind == "total":
+            SPORTS[name] = replace(sport, total_mass=table_mass(table, sport.total_mass, symmetric=False))

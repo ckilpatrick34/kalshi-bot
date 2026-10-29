@@ -80,3 +80,49 @@ CREATE TABLE IF NOT EXISTS signals (
 
 CREATE INDEX IF NOT EXISTS signals_fired ON signals (fired_at);
 CREATE INDEX IF NOT EXISTS signals_event ON signals (event_id, market)
+;
+
+-- Final scores (ESPN), the model's training data.
+CREATE TABLE IF NOT EXISTS results (
+    game_id TEXT PRIMARY KEY,
+    sport TEXT NOT NULL,
+    played TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    home_pts INTEGER NOT NULL,
+    away_pts INTEGER NOT NULL,
+    neutral INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS results_sport_played ON results (sport, played);
+
+-- Model projection per upcoming odds-feed event (home margin and total, in points).
+CREATE TABLE IF NOT EXISTS projections (
+    event_id TEXT PRIMARY KEY,
+    sport TEXT NOT NULL,
+    margin DOUBLE PRECISION NOT NULL,
+    total DOUBLE PRECISION NOT NULL,
+    sd_margin DOUBLE PRECISION NOT NULL,
+    sd_total DOUBLE PRECISION NOT NULL,
+    home_power DOUBLE PRECISION,
+    away_power DOUBLE PRECISION,
+    fitted_at TEXT NOT NULL
+);
+
+-- Point-to-probability tables refit from final scores (kind: margin or total).
+CREATE TABLE IF NOT EXISTS mass_tables (
+    sport TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    k INTEGER NOT NULL,
+    p DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (sport, kind, k)
+);
+
+-- Upcoming games ESPN lists at a neutral site (the odds feed has no such flag).
+CREATE TABLE IF NOT EXISTS neutral_sites (
+    sport TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    starts TEXT NOT NULL,
+    PRIMARY KEY (sport, home, away, starts)
+)

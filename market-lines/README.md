@@ -21,6 +21,7 @@ whatever changed, and runs the detectors on each market that moved:
 | `rlm` | 60%+ of tickets are on one side and the line moved 3+ points the other way. Needs a betting-splits source (`splits` command); none is wired up yet. |
 | `rlm_proxy` | No splits: a 3+ point move toward the underdog or the under, where public money rarely goes. Logged separately so its CLV is judged on its own. |
 | `divergence` | One book's number is +2.5% EV or better against the sharp consensus (Pinnacle if it quotes the game, else the median of the other books). |
+| `model` | The ratings model below prices a book's number at +4% EV or better. Fires once per side, and is judged on CLV like the rest. |
 
 Moves are measured in probability rather than points so one rule covers
 moneylines, spreads and totals and so a juice move counts as much as a number
@@ -40,6 +41,38 @@ become the close and each signal gets:
 `ledger` prints rolling CLV by sport and signal type and marks a signal type
 `retire` once it has 30+ settled signals and a negative average, which is the rule
 from the plan.
+
+## The game model
+
+`model.py` rates every team's offense and defense from final scores with a weighted
+ridge regression: each team's points = league average + its offense − the
+opponent's defense ± half the home edge (no edge at neutral sites). Recent games
+count more (half-life 120 days in football, 60 in basketball), and last season's
+games enter at a decayed weight, which works as a preseason prior. Ridge
+shrinkage keeps teams with few games near average.
+
+That gives a projected margin and total for any matchup. The spread of real results
+around past projections (measured out of sample) sets the sigma that turns them into
+win, cover and over probabilities. Those projections are the Quant tier's "model
+line next to the market" and drive the `model` signal.
+
+The same scores refit the margin and total tables that convert line moves into
+probability, so `key` and every point-based comparison use real frequencies
+instead of hand estimates once 300+ games are stored.
+
+```bash
+python -m marketlines scores --sport ncaaf --start 2025-08-23 --end 2026-11-08   # two seasons + next week's neutral sites
+python -m marketlines scores --sport ncaab --start 2024-11-04 --end 2026-11-08
+python -m marketlines evaluate --sport ncaaf --start 2025-09-20 --end 2026-01-20 --half-life 60 120 200 --ridge 2 4 8
+python -m marketlines fit                 # refit, refit tables, project upcoming games
+python -m marketlines ratings --sport ncaaf
+python -m marketlines projections         # model line, market line, difference, win %
+```
+
+`run` collects new scores and refits once a day on its own. `evaluate` is a
+walk-forward test (refit weekly on earlier games only, score the next week) for
+tuning half-life and ridge. The honest bar for the model is not winners picked but
+whether `model` signals beat the close in the ledger.
 
 ## Run it
 
@@ -96,11 +129,16 @@ Steam needs polls under 30 minutes apart, so a coarse backfill will not produce 
 | `marketlines/signals.py` | The six detectors |
 | `marketlines/clv.py` | Closing lines and per-signal CLV |
 | `marketlines/engine.py` | Ingest a snapshot, settle closes, pacing, backfill |
+| `marketlines/results.py` | Final scores and neutral sites from ESPN's scoreboard |
+| `marketlines/model.py` | Ratings fit, probabilities, walk-forward check, table refits |
+| `marketlines/projections.py` | Collect scores, refit, project upcoming feed events |
+| `marketlines/teams.py` | Team-name matching between the odds feed and ESPN |
 | `marketlines/store.py`, `schema.sql` | SQLite / Supabase storage |
 | `marketlines/sports.py` | Per-sport books, key numbers, margin tables and thresholds |
 
 ## Not done yet
 
-* No live run yet: the build sandbox can't reach the odds API, so the response parsing is written to The Odds API's documented v4 format and tested on fixtures.
+* No live run yet: the build sandbox can't reach the odds API or ESPN, so the response parsing is written to their documented formats and tested on fixtures, and the model is tested on simulated seasons. First real run: `scores`, `evaluate`, `fit`, then `run`.
+* The model uses scores only. Box-score features (yards per play, tempo, injuries) would sharpen it and are the next step once its CLV is known.
 * No betting-splits source, so `rlm` stays silent and `rlm_proxy` stands in.
 * Alerts, the public ledger page and Stripe are weeks 3–4.

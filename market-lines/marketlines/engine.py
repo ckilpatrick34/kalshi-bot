@@ -44,7 +44,8 @@ def ingest(store: Store, sport: Sport, events: list[Event], quotes: list[Quote],
     found = []
     for event_id, market in sorted(changed):
         tl = Timeline(store.timeline_rows(event_id, market))
-        found += detect(sport, market, event_id, tl, t0, ts, store.ticket_share(event_id, market, ts))
+        found += detect(sport, market, event_id, tl, t0, ts, store.ticket_share(event_id, market, ts),
+                        store.projection(event_id))
     new = store.insert_signals(found)
     store.commit()
     log.info("%s %s: %d events, %d changed lines, %d new signals", sport.name, ts.isoformat(), len(events),

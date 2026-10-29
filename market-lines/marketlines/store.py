@@ -210,6 +210,63 @@ class Store:
             (iso(since),),
         )
 
+    # Results, projections and fitted tables (the model)
+
+    def insert_results(self, results):
+        self.executemany(
+            """INSERT INTO results (game_id, sport, played, home, away, home_pts, away_pts, neutral)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (game_id) DO UPDATE SET
+               home_pts = excluded.home_pts, away_pts = excluded.away_pts""",
+            [(r.game_id, r.sport, iso(r.played), r.home, r.away, r.home_pts, r.away_pts, int(r.neutral))
+             for r in results],
+        )
+
+    def results(self, sport: str, since: datetime | None = None) -> list:
+        from .results import Result
+
+        rows = self.query(
+            """SELECT game_id, sport, played, home, away, home_pts, away_pts, neutral FROM results
+               WHERE sport = ? AND played >= ? ORDER BY played""",
+            (sport, iso(since) if since else ""),
+        )
+        return [Result(r[0], r[1], parse_ts(r[2]), r[3], r[4], r[5], r[6], bool(r[7])) for r in rows]
+
+    def insert_neutral_sites(self, sport: str, rows):
+        self.executemany("INSERT INTO neutral_sites (sport, home, away, starts) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                         [(sport, h, a, iso(t)) for h, a, t in rows])
+
+    def neutral_sites(self, sport: str, since: datetime) -> list[tuple[str, str, datetime]]:
+        rows = self.query("SELECT home, away, starts FROM neutral_sites WHERE sport = ? AND starts >= ?", (sport, iso(since)))
+        return [(r[0], r[1], parse_ts(r[2])) for r in rows]
+
+    def save_projections(self, rows):
+        """rows: (event_id, sport, margin, total, sd_margin, sd_total, home_power, away_power, fitted_at)."""
+        self.executemany(
+            """INSERT INTO projections (event_id, sport, margin, total, sd_margin, sd_total, home_power,
+                                        away_power, fitted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO UPDATE SET
+               margin = excluded.margin, total = excluded.total, sd_margin = excluded.sd_margin,
+               sd_total = excluded.sd_total, home_power = excluded.home_power,
+               away_power = excluded.away_power, fitted_at = excluded.fitted_at""",
+            [(*r[:8], iso(r[8])) for r in rows],
+        )
+
+    def projection(self, event_id: str) -> tuple | None:
+        """(margin, total, sd_margin, sd_total) or None."""
+        rows = self.query("SELECT margin, total, sd_margin, sd_total FROM projections WHERE event_id = ?", (event_id,))
+        return rows[0] if rows else None
+
+    def save_mass_table(self, sport: str, kind: str, table: dict[int, float]):
+        self.execute("DELETE FROM mass_tables WHERE sport = ? AND kind = ?", (sport, kind))
+        self.executemany("INSERT INTO mass_tables (sport, kind, k, p) VALUES (?, ?, ?, ?)",
+                         [(sport, kind, k, p) for k, p in table.items()])
+
+    def mass_tables(self) -> dict[tuple[str, str], dict[int, float]]:
+        out: dict = {}
+        for sport, kind, k, p in self.query("SELECT sport, kind, k, p FROM mass_tables"):
+            out.setdefault((sport, kind), {})[k] = p
+        return out
+
     def recent_signals(self, since: datetime, min_score: float = 0) -> list[tuple]:
         return self.query(
             """SELECT s.fired_at, s.sport, e.away, e.home, s.market, s.kind, s.side, s.book, s.line, s.price,
