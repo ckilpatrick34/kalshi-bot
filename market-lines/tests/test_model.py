@@ -140,7 +140,7 @@ class FakeEspn:
         self.results, self.neutral = results, neutral
 
     def days(self, sport, start, end):
-        yield start, self.results, self.neutral
+        yield start, self.results, self.neutral, []
 
 
 def test_refit_projects_feed_events(tmp_path):
@@ -169,3 +169,72 @@ def test_refit_projects_feed_events(tmp_path):
     finally:
         SPORTS.clear()
         SPORTS.update(original)
+
+
+# Book lines and the market test
+
+from marketlines.edges import market_test, price_slate  # noqa: E402
+from marketlines.results import BookLine, parse_lines, summary_line  # noqa: E402
+
+
+def test_parse_lines_from_scoreboard():
+    payload = {"events": [{"id": "9", "date": "2026-10-31T16:00Z", "competitions": [{
+        "neutralSite": True, "date": "2026-10-31T16:00Z",
+        "competitors": [{"homeAway": "home", "team": {"displayName": "Navy Midshipmen"}},
+                        {"homeAway": "away", "team": {"displayName": "Notre Dame Fighting Irish"}}],
+        "odds": [{"provider": {"name": "DraftKings"}, "spread": 30.5, "overUnder": 56.5,
+                  "homeTeamOdds": {"favorite": False}, "awayTeamOdds": {"favorite": True},
+                  "pointSpread": {"home": {"open": {"line": "+28.5", "odds": "-110"}, "close": {"line": "+30.5", "odds": "-110"}},
+                                  "away": {"close": {"line": "-30.5", "odds": "-110"}}},
+                  "total": {"over": {"open": {"line": "o55.5"}, "close": {"line": "o56.5", "odds": "-112"}},
+                            "under": {"close": {"line": "u56.5", "odds": "EVEN"}}},
+                  "moneyline": {"home": {"close": {"odds": "+2000"}}, "away": {"close": {"odds": "-6500"}}}}],
+    }]}]}
+    (l,) = parse_lines(payload, "ncaaf")
+    assert (l.home, l.spread, l.spread_open, l.total, l.total_open, l.neutral) == ("Navy Midshipmen", 30.5, 28.5, 56.5, 55.5, True)
+    assert l.under_price == 2.0 and l.ml_home == 21.0
+    assert l.spread_home_price == pytest.approx(1.909, abs=1e-3)
+
+
+def test_summary_line_uses_favourite_for_sign():
+    r = Result("5", "ncaaf", START, "Miami Hurricanes", "Stanford Cardinal", 40, 10, False)
+    summary = {"pickcenter": [{"provider": {"name": "DraftKings"}, "spread": 20.5, "overUnder": 50.5,
+                               "overOdds": -118, "underOdds": -102,
+                               "homeTeamOdds": {"favorite": True, "spreadOdds": -112, "moneyLine": -2000},
+                               "awayTeamOdds": {"favorite": False, "spreadOdds": -108, "moneyLine": 950}}]}
+    l = summary_line(summary, r)
+    assert l.spread == -20.5 and l.total == 50.5 and l.ml_away == 10.5
+    assert summary_line({"pickcenter": []}, r) is None
+
+
+def _lines_for(results, bias=0.0):
+    """A 'market' that knows the truth with small noise: margin minus noise, shifted by bias."""
+    rng = random.Random(3)
+    out = []
+    for r in results:
+        market_margin = r.margin + rng.gauss(0, 4) + bias
+        out.append(BookLine(r.game_id, r.sport, r.played, r.home, r.away, r.neutral, "Test",
+                            None, -round(market_margin * 2) / 2, J, J, None, round(r.total + rng.gauss(0, 5)) + 0.5, J, J, None, None))
+    return out
+
+
+def test_market_test_trusts_a_sharper_market():
+    results, _, _ = synthetic_season(weeks=16)
+    test, _rows = market_test(results, _lines_for(results), "ncaaf",
+                              START + timedelta(weeks=5), START + timedelta(weeks=16))
+    # This market is far sharper than a scores-only model, so the blend leans on it.
+    assert test.market_mae < test.model_mae
+    assert test.weight < 0.3
+    assert sum(b.bets for b in test.spread_buckets) == test.games
+
+
+def test_price_slate_finds_no_edge_when_model_agrees():
+    results, _, _ = synthetic_season(weeks=16)
+    now = START + timedelta(weeks=16)
+    ratings = fit(results, "ncaaf", now)
+    margin, total = ratings.project("Team1 Tigers", "Team2 Tigers")
+    agree = BookLine("u1", "ncaaf", now + timedelta(days=2), "Team1 Tigers", "Team2 Tigers", False, "Test",
+                     None, -round(margin * 2) / 2 - 0.5, J, J, None, round(total) + 0.5, J, J, None, None)
+    test, _ = market_test(results, _lines_for(results), "ncaaf", START + timedelta(weeks=5), now)
+    plays = price_slate(ratings, test, [agree])
+    assert plays and all(p.ev < 0.01 for p in plays)

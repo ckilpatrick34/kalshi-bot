@@ -15,15 +15,39 @@ CHECK_WINDOW = {"ncaaf": timedelta(days=75), "ncaab": timedelta(days=60), "ncaab
 
 
 def collect(store: Store, espn, sport: str, start: date, end: date) -> tuple[int, int]:
-    """Store final scores, and upcoming neutral sites, for each day in the range."""
-    games = sites = 0
-    for _day, results, neutral in espn.days(sport, start, end):
+    """Store final scores, upcoming neutral sites and ESPN's book lines for each day in the range."""
+    games = sites = lines = 0
+    for _day, results, neutral, book_lines in espn.days(sport, start, end):
         store.insert_results(results)
         store.insert_neutral_sites(sport, neutral)
+        store.upsert_book_lines(book_lines)
         store.commit()
         games += len(results)
         sites += len(neutral)
-    return games, sites
+        lines += len(book_lines)
+    return games, sites, lines
+
+
+def collect_closing_lines(store: Store, espn, sport: str, since: datetime, until: datetime, workers: int = 8) -> int:
+    """Fetch closing lines for finished games in the window that don't have one yet."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .results import summary_line
+
+    have = {l.game_id for l in store.book_lines(sport, since, until)}
+    todo = [r for r in store.results(sport, since) if r.played < until and r.game_id not in have]
+
+    def fetch(result):
+        try:
+            return summary_line(espn.summary(sport, result.game_id), result)
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(workers) as pool:
+        lines = [l for l in pool.map(fetch, todo) if l is not None]
+    store.upsert_book_lines(lines)
+    store.commit()
+    return len(lines)
 
 
 @dataclass

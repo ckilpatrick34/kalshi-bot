@@ -125,4 +125,25 @@ CREATE TABLE IF NOT EXISTS neutral_sites (
     away TEXT NOT NULL,
     starts TEXT NOT NULL,
     PRIMARY KEY (sport, home, away, starts)
+);
+
+-- One book's lines per game as ESPN shows them (open and current; current = close once played).
+CREATE TABLE IF NOT EXISTS book_lines (
+    game_id TEXT PRIMARY KEY,
+    sport TEXT NOT NULL,
+    starts TEXT NOT NULL,
+    home TEXT NOT NULL,
+    away TEXT NOT NULL,
+    neutral INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    spread_open DOUBLE PRECISION,
+    spread DOUBLE PRECISION,
+    spread_home_price DOUBLE PRECISION,
+    spread_away_price DOUBLE PRECISION,
+    total_open DOUBLE PRECISION,
+    total DOUBLE PRECISION,
+    over_price DOUBLE PRECISION,
+    under_price DOUBLE PRECISION,
+    ml_home DOUBLE PRECISION,
+    ml_away DOUBLE PRECISION
 )

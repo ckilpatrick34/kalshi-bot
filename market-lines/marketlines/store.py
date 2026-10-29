@@ -231,6 +231,30 @@ class Store:
         )
         return [Result(r[0], r[1], parse_ts(r[2]), r[3], r[4], r[5], r[6], bool(r[7])) for r in rows]
 
+    BOOK_LINE_FIELDS = ("game_id", "sport", "starts", "home", "away", "neutral", "provider", "spread_open", "spread",
+                        "spread_home_price", "spread_away_price", "total_open", "total", "over_price",
+                        "under_price", "ml_home", "ml_away")
+
+    def upsert_book_lines(self, lines):
+        cols = self.BOOK_LINE_FIELDS
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols[1:])
+        self.executemany(
+            f"INSERT INTO book_lines ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+            f"ON CONFLICT (game_id) DO UPDATE SET {updates}",
+            [tuple(iso(v) if c == "starts" else int(v) if c == "neutral" else v
+                   for c, v in ((c, getattr(l, c)) for c in cols)) for l in lines],
+        )
+
+    def book_lines(self, sport: str, since: datetime | None = None, until: datetime | None = None) -> list:
+        from .results import BookLine
+
+        rows = self.query(
+            f"SELECT {', '.join(self.BOOK_LINE_FIELDS)} FROM book_lines WHERE sport = ? AND starts >= ? AND starts < ? "
+            "ORDER BY starts",
+            (sport, iso(since) if since else "", iso(until) if until else "9999"),
+        )
+        return [BookLine(*r[:2], parse_ts(r[2]), r[3], r[4], bool(r[5]), *r[6:]) for r in rows]
+
     def insert_neutral_sites(self, sport: str, rows):
         self.executemany("INSERT INTO neutral_sites (sport, home, away, starts) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
                          [(sport, h, a, iso(t)) for h, a, t in rows])

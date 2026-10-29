@@ -25,8 +25,8 @@ from .results import Result
 
 DEFAULTS = {
     # half-life (days), ridge strength, starting sigma for margin and total
-    "ncaaf": {"half_life": 120.0, "ridge": 4.0, "sd_margin": 15.5, "sd_total": 15.0},
-    "ncaab": {"half_life": 60.0, "ridge": 4.0, "sd_margin": 11.0, "sd_total": 12.5},
+    "ncaaf": {"half_life": 200.0, "ridge": 1.0, "sd_margin": 15.5, "sd_total": 15.0},
+    "ncaab": {"half_life": 200.0, "ridge": 1.0, "sd_margin": 11.0, "sd_total": 12.5},
     "ncaabase": {"half_life": 45.0, "ridge": 8.0, "sd_margin": 4.5, "sd_total": 4.5},
 }
 

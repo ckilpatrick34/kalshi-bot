@@ -23,12 +23,13 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from .edges import market_test, price_slate
 from .engine import backfill, backfill_cost, live_cost, next_delay, poll, settle
 from .feed import OddsApi
 from .prices import decimal_to_american
 from .lines import Timeline, ref_point
 from .model import fit, walk_forward, win_prob
-from .projections import collect, refit
+from .projections import collect, collect_closing_lines, refit
 from .results import Espn
 from .sports import SPORTS, use_fitted_tables
 from .store import Store, iso, parse_ts
@@ -153,8 +154,15 @@ def cmd_splits(args, store):
 def cmd_scores(args, store):
     start = parse_ts(args.start).date()
     end = parse_ts(args.end).date() if args.end else datetime.now(timezone.utc).date()
-    games, sites = collect(store, Espn(), args.sport, start, end)
-    print(f"{args.sport}: stored {games} final scores and {sites} upcoming neutral-site games")
+    games, sites, lines = collect(store, Espn(cache=args.cache), args.sport, start, end)
+    print(f"{args.sport}: stored {games} final scores, {lines} game lines, {sites} upcoming neutral-site games")
+
+
+def cmd_lines(args, store):
+    start = parse_ts(args.start)
+    end = parse_ts(args.end) if args.end else datetime.now(timezone.utc)
+    found = collect_closing_lines(store, Espn(cache=args.cache), args.sport, start, end)
+    print(f"{args.sport}: stored {found} closing lines")
 
 
 def cmd_fit(args, store):
@@ -220,6 +228,57 @@ def cmd_projections(args, store):
               f"{total:>7.1f}{(f'{mkt_total:.1f}' if mkt_total is not None else '-'):>8}")
 
 
+def _market_test(store, sport, start, end):
+    results = store.results(sport)
+    if start is None:
+        if not results:
+            return None, results
+        start = results[0].played + timedelta(days=60)  # leave the first season's opening weeks as warm-up
+    test, _ = market_test(results, store.book_lines(sport), sport, start, end)
+    return test, results
+
+
+def print_market_test(sport, test):
+    print(f"{sport}: {test.games} games vs the book's closing spread")
+    print(f"  margin MAE: model {test.model_mae:.2f}, market {test.market_mae:.2f}; "
+          f"blend weight on model {test.weight:.2f}, blended sd {test.sd:.1f}")
+    print(f"  total MAE:  model {test.total_model_mae:.2f}, market {test.total_market_mae:.2f}; "
+          f"blend weight {test.total_weight:.2f} over {test.total_games} games")
+    for name, buckets in (("spread", test.spread_buckets), ("total", test.total_buckets)):
+        print(f"  betting the raw model's side of the {name} (breakeven 52.4% at -110):")
+        for b in buckets:
+            print(f"    edge {b.label:<9} {b.bets:>5} bets  {b.win_rate:>6.1%} won  ROI {b.roi:>+6.1%}")
+
+
+def cmd_backtest_market(args, store):
+    end = parse_ts(args.end) if args.end else datetime.now(timezone.utc)
+    test, _ = _market_test(store, args.sport, parse_ts(args.start) if args.start else None, end)
+    if test is None:
+        print("not enough games with lines; run `scores` first")
+        return
+    print_market_test(args.sport, test)
+
+
+def cmd_slate(args, store):
+    now = datetime.now(timezone.utc)
+    test, results = _market_test(store, args.sport, None, now)
+    if test is None:
+        print("not enough games with lines; run `scores` first")
+        return
+    lines = [l for l in store.book_lines(args.sport, now, now + timedelta(days=args.days))]
+    plays = price_slate(fit(results, args.sport, now), test, lines)
+    print_market_test(args.sport, test)
+    print(f"\n{len(lines)} upcoming games with lines; plays at {args.min_ev:.0%}+ EV:")
+    shown = [p for p in plays if p.ev >= args.min_ev]
+    for p in shown:
+        l = p.line
+        number = f" {p.number:+g}" if p.market == "spread" else f" {p.number:g}" if p.market == "total" else ""
+        print(f"  {l.starts:%a %m-%d %H:%M} {l.away} @ {l.home}: {p.side}{number} ({decimal_to_american(p.price):+d}, "
+              f"{l.provider}) win {p.prob:.1%}, EV {p.ev:+.1%}  [model {p.model_number:+.1f} vs market {p.market_number:+.1f}]")
+    if not shown:
+        print("  none")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="marketlines", description="College line-movement signals and CLV ledger")
     parser.add_argument("--db", help="SQLite path or postgres:// URL (default: MARKETLINES_DB or marketlines.db)")
@@ -250,8 +309,15 @@ def main(argv=None):
     p = sub.add_parser("scores")
     p.add_argument("--sport", choices=sorted(SPORTS), required=True)
     p.add_argument("--start", required=True)
-    p.add_argument("--end", help="default today; a future date also records upcoming neutral-site games")
+    p.add_argument("--end", help="default today; a future date also records upcoming games and lines")
+    p.add_argument("--cache", help="folder to keep finished days' raw scoreboards in")
     p.set_defaults(func=cmd_scores)
+    p = sub.add_parser("lines", help="closing lines for finished games (ESPN keeps about a year)")
+    p.add_argument("--sport", choices=sorted(SPORTS), required=True)
+    p.add_argument("--start", required=True)
+    p.add_argument("--end")
+    p.add_argument("--cache", help="folder to keep fetched summaries in")
+    p.set_defaults(func=cmd_lines)
     p = sub.add_parser("fit")
     p.add_argument("--sports", type=sports_arg, default=sports_arg("ncaaf,ncaab"))
     p.set_defaults(func=cmd_fit)
@@ -267,6 +333,16 @@ def main(argv=None):
     p.add_argument("--top", type=int, default=25)
     p.set_defaults(func=cmd_ratings)
     sub.add_parser("projections").set_defaults(func=cmd_projections)
+    p = sub.add_parser("backtest-market", help="walk-forward model vs the book's closing lines")
+    p.add_argument("--sport", choices=sorted(SPORTS), required=True)
+    p.add_argument("--start")
+    p.add_argument("--end")
+    p.set_defaults(func=cmd_backtest_market)
+    p = sub.add_parser("slate", help="price upcoming games from ESPN's lines with the market-blended model")
+    p.add_argument("--sport", choices=sorted(SPORTS), required=True)
+    p.add_argument("--days", type=float, default=4)
+    p.add_argument("--min-ev", type=float, default=0.02)
+    p.set_defaults(func=cmd_slate)
     p = sub.add_parser("splits")
     p.add_argument("file")
     p.set_defaults(func=cmd_splits)

@@ -69,6 +69,22 @@ python -m marketlines ratings --sport ncaaf
 python -m marketlines projections         # model line, market line, difference, win %
 ```
 
+### Testing it against the market
+
+`scores` also stores the book line ESPN shows for upcoming games (DraftKings), and
+`lines` fetches closing lines for finished games (ESPN keeps about a year).
+`backtest-market` then refits weekly and compares the model with the closing line
+on the same games, and fits how much weight the model's disagreement with the line
+deserves. `slate` prices upcoming games with that blended number, so a play only
+shows up where history says the model's disagreement paid.
+
+First real run (29 Oct 2026): against DraftKings closing lines the scores-only
+model lost to the market on every measure: margin error 13.2 vs 11.4 points in
+568 FBS games this season, 9.4 vs 8.9 in 4,766 college basketball games last
+season, and the fitted weight on the model was 0. Betting its side lost at every
+edge size. It stays in as a baseline and as the Quant-tier projection, not as a
+source of plays, until features beyond scores earn it weight.
+
 `run` collects new scores and refits once a day on its own. `evaluate` is a
 walk-forward test (refit weekly on earlier games only, score the next week) for
 tuning half-life and ridge. The honest bar for the model is not winners picked but
