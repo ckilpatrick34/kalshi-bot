@@ -23,6 +23,7 @@ The research write-up behind this code: https://claude.ai/artifact/89RoCLY3Kw7hY
 | `kalshi_bot/strategies/longshot.py` | Sells overpriced longshots with resting orders |
 | `kalshi_bot/strategies/bracket.py` | Finds bracket ladders that don't add up to $1 after fees |
 | `scripts/run_backtest.py` | Parameter search on older data, one out-of-sample run on newer data |
+| `kalshi_bot/gameday.py`, `scripts/gameday.py` | College football game-day board: Kalshi prices vs the sportsbook line, paper bets |
 
 ## Usage
 
@@ -32,6 +33,27 @@ pytest
 python -m kalshi_bot.collector KXHIGHNY KXHIGHCHI --out data --since 2025-06-01
 python scripts/run_backtest.py --data data --split 2026-07-01
 ```
+
+## College football game day
+
+```bash
+python scripts/gameday.py board            # this Saturday: Kalshi plays priced below the book's fair line
+python scripts/gameday.py board --all      # every matched game, both teams
+python scripts/gameday.py board --paper    # log flagged plays as paper bets in paper/gameday.jsonl
+python scripts/gameday.py settle           # settle paper bets from Kalshi results, print the record
+python scripts/paper_trade.py --series KXNCAAFGAME --out paper   # longshot paper trader on CFB
+```
+
+For each FBS game, the DraftKings moneyline from ESPN's public scoreboard is devigged into
+a fair win probability and compared with the cheapest way to back each team on Kalshi
+(YES on the team or NO on its opponent). A play is flagged when fair / (ask + taker fee)
+beats 1 + `--min-ev` (3% by default). `Limit` is the highest resting bid that still clears
+that bar. Paper sizes are quarter Kelly on `--bankroll` ($200), capped at `--max-bet` ($10)
+a play and `--day-cap` ($50) a run, one side per game, skipping prices outside 8–92¢ and
+markets with under 100 contracts traded. No keys needed and no orders sent.
+
+DraftKings has a margin and isn't the sharpest book, so treat small edges as noise. On the
+first run (29 Oct) Kalshi tracked the book within a point or two on every FBS game.
 
 ## Credentials
 
